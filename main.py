@@ -167,7 +167,7 @@ def sync_rtc() -> bool:
             machine.RTC().datetime((
                 local[0]+30, local[1], local[2],     # Y, M, D
                 local[6] + 1,                     # weekday (1-7, Mon-Sun)
-                local[3], local[4], local[5]+30,     # H, M, S
+                local[3], local[4], local[5]+15,     # H, M, S
                 0))                               # subseconds = 0
             return True
         except:
