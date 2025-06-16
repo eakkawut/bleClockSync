@@ -10,15 +10,16 @@ import usocket
 from machine import RTC, Pin
 import aioble
 from micropython import const
+import bluetooth
 
 # ===================== USER CONFIG =====================
 WIFI_SSID = "jenova"
 WIFI_PASSWORD = "hahako90"
 WIFI_BACKOFF_S = [5, 10, 20]
 
-TZ_OFFSET = 25230  # UTC+7 Bangkok (seconds)
+TZ_OFFSET = 25200  # UTC+7 Bangkok (seconds)
 NTP_HOST = "time.apple.com"
-NTP_TRIES = 5
+NTP_TRIES = 10
 
 LY_CLOCKS = [
     "18:5E:D1:40:DC:CB",
@@ -33,11 +34,11 @@ LOG_FILE_NAME = "esp32_clock_sync.log"
 
 BASE_SLEEP_SEC = 4 * 3600  # 4 hours
 LED_PIN = 2
-SCAN_DURATION_MS = 15 * 60 * 1000  # 15 minutes
+SCAN_DURATION_MS = 1 * 60 * 1000  # 15 minutes
 
 # GATT UUIDs
-TIME_SERVICE_UUID = const("EBE0CCB0-7A0A-4B0C-8A1A-6FF2997DA3A6")
-TIME_CHAR_UUID = const("EBE0CCB7-7A0A-4B0C-8A1A-6FF2997DA3A6")
+TIME_SERVICE_UUID = bluetooth.UUID("EBE0CCB0-7A0A-4B0C-8A1A-6FF2997DA3A6")
+TIME_CHAR_UUID = bluetooth.UUID("EBE0CCB7-7A0A-4B0C-8A1A-6FF2997DA3A6")
 
 # ===================== GLOBAL OBJECTS =====================
 rtc = RTC()
@@ -49,31 +50,54 @@ class Lywsd02TimeClient:
         self.mac = mac
         self.tz_offset_hours = tz_offset_hours
     
-    async def set_time(self, timestamp_utc=None):
-        """Set device time using UTC timestamp and timezone offset"""
-        if timestamp_utc is None:
-            timestamp_utc = time.time()
-        
-        # Pack data: 4-byte timestamp + 1-byte timezone
-        data = struct.pack('<Ib', int(timestamp_utc), self.tz_offset_hours)
+    async def set_time(self, timestamp_utc=None):        
+        data = get_current_time()
         
         try:
             # Connect to device
-            device = aioble.Device(aioble.ADDR_RANDOM, self.mac)
-            connection = await device.connect(timeout_ms=10000)
+            device = aioble.Device(aioble.ADDR_PUBLIC, self.mac)
+            await asyncio.sleep(2)
+            connection = await device.connect(timeout_ms=120000)
+            await asyncio.sleep(2)
             
             # Access time service and characteristic
             service = await connection.service(TIME_SERVICE_UUID)
+            await asyncio.sleep(2)
             char = await service.characteristic(TIME_CHAR_UUID)
+            await asyncio.sleep(2)
+
             
             # Write time data with response
             await char.write(data, True)
+            await asyncio.sleep(5)
+            await connection.disconnect()
+            await asyncio.sleep(2)
             return True
-        except (asyncio.TimeoutError, OSError) as e:
+        except Exception as e:
+            post_log_sync(ujson.dumps({
+                "stage": "ble_write_error",
+                "mac":   self.mac,
+                "error": repr(e)
+            }))
             return False
         finally:
             if 'connection' in locals():
                 await connection.disconnect()
+            gc.collect()
+
+def get_current_time(zone=7):
+    ts = int(time.time()) + (10)
+    post_log_sync(ujson.dumps({
+        "get_current_time ts": str(ts),
+    }))
+
+    # Pack as little-endian 32-bit unsigned + 1-byte unsigned
+    buf = struct.pack('<IB', ts, zone)
+    post_log_sync(ujson.dumps({
+        "get_current_time buf": str(buf),
+    }))
+
+    return buf
 
 # ===================== UTILITY FUNCTIONS =====================
 def post_log_sync(message: str, retries: int = 3) -> bool:
@@ -172,10 +196,18 @@ def sync_rtc() -> bool:
             # Validate time (year should be >= 2023)
             if time.gmtime(utc)[0] < 2023:
                 raise ValueError("Invalid time received from NTP")
+
+            utc = time.time()
+            local = time.gmtime(utc + 7)  # tuple in local zone
+            machine.RTC().datetime((
+                local[0]+30, local[1], local[2],     # Y, M, D
+                local[6] + 1,                     # weekday (1-7, Mon-Sun)
+                local[3], local[4], local[5]+30,     # H, M, S
+                0))                               # subseconds = 0
                 
             state["ntp_fails"] = 0
             save_state(state)
-            post_log_sync(ujson.dumps({"stage": "sync_rtc_success"}))
+            post_log_sync(ujson.dumps({"stage": "sync_rtc_success","time.time() :":time.time()}))
             return True
         except Exception as e:
             state["ntp_fails"] = state.get("ntp_fails", 0) + 1
@@ -276,7 +308,8 @@ async def sync_devices(devices, tz_offset_hours):
             }))
             
             # Delay between device syncs
-            await asyncio.sleep(3)
+            await asyncio.sleep(10)
+            gc.collect()
         except Exception as e:
             results[mac] = False
             post_log_sync(ujson.dumps({
@@ -338,7 +371,7 @@ def main():
             "stage": "main_sleeping", 
             "sleep_sec": sleep_sec
         }))
-        machine.deepsleep(sleep_sec * 1000)
+        #machine.deepsleep(sleep_sec * 1000)
         
     except Exception as ex:
         # Critical error handling
