@@ -107,7 +107,7 @@ class Lywsd02TimeClient:
 # ─────────────────── HELPERS ───────────────────
 def get_current_time(tz_hours: int) -> bytes:
     """Return 5-byte payload: <little-endian uint32 epoch+10> + <int8 TZ>"""
-    ts = int(time.time()) + 10           # add 10 s per Xiaomi spec
+    ts = int(time.time())
     return struct.pack("<IB", ts, tz_hours)
 
 def post_log_sync(message: str, retries: int = 3) -> bool:
