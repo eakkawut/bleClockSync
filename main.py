@@ -50,29 +50,64 @@ class Lywsd02TimeClient:
         self.mac = mac
         self.tz_offset_hours = tz_offset_hours
     
-    async def set_time(self, timestamp_utc=None):        
-        data = get_current_time()
-        
-        try:
-            # Connect to device
-            device = aioble.Device(aioble.ADDR_PUBLIC, self.mac)
-            await asyncio.sleep(2)
-            connection = await device.connect(timeout_ms=120000)
-            await asyncio.sleep(2)
-            
-            # Access time service and characteristic
-            service = await connection.service(TIME_SERVICE_UUID)
-            await asyncio.sleep(2)
-            char = await service.characteristic(TIME_CHAR_UUID)
-            await asyncio.sleep(2)
 
-            
-            # Write time data with response
-            await char.write(data, True)
-            await asyncio.sleep(5)
-            await connection.disconnect()
-            await asyncio.sleep(2)
-            return True
+    async def set_time(self, timestamp_utc=None):
+        # Build the 5-byte payload
+        data = get_current_time( zone=7)
+
+        connection = None
+        for attempt in range(1, 6):  # 1..5
+            gc.collect()
+            try:
+                device = aioble.Device(aioble.ADDR_PUBLIC, self.mac)
+                await asyncio.sleep(1)
+                connection = await device.connect(timeout_ms=5000)
+                break  # success!
+            except Exception as e:
+                post_log_sync(ujson.dumps({
+                    "stage": f"ble_connect_error_attempt_{attempt}",
+                    "mac":   self.mac,
+                    "error": repr(e)
+                }))
+                # small back-off before retrying
+                await asyncio.sleep(1)
+        else:
+            # exhausted retries
+            return False
+
+        try:
+        # retry characteristic lookup
+            for attempt in range(1, 6):
+                gc.collect()
+                try:
+                    char = await device.characteristic(TIME_CHAR_UUID)
+                    break
+                except Exception as e:
+                    post_log_sync(ujson.dumps({
+                        "stage": f"ble_char_error_attempt_{attempt}",
+                        "mac":   self.mac,
+                        "error": repr(e)
+                    }))
+                    await asyncio.sleep(1)
+            else:
+                return False  # characteristic lookup failed
+
+            # retry write
+            for attempt in range(1, 6):
+                gc.collect()
+                try:
+                    await char.write(data, True)
+                    break
+                except Exception as e:
+                    post_log_sync(ujson.dumps({
+                        "stage": f"ble_write_error_attempt_{attempt}",
+                        "mac":   self.mac,
+                        "error": repr(e)
+                    }))
+                    await asyncio.sleep(1)
+            else:
+                return False  # write failed
+
         except Exception as e:
             post_log_sync(ujson.dumps({
                 "stage": "ble_write_error",
@@ -80,10 +115,17 @@ class Lywsd02TimeClient:
                 "error": repr(e)
             }))
             return False
+
         finally:
-            if 'connection' in locals():
-                await connection.disconnect()
+            # ensure we always disconnect
+            try:
+                if connection:
+                    await connection.disconnect()
+                    await asyncio.sleep(2)
+            except Exception:
+                pass
             gc.collect()
+
 
 def get_current_time(zone=7):
     ts = int(time.time()) + (10)
