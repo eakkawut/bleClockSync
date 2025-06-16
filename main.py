@@ -1,65 +1,85 @@
-# ---------------- /flash/main.py ------------------------------------
-# ESP32 MicroPython clock sync
-
-import gc
-import time
-import uos
-import ujson
-import usocket
-import _thread
-import ntptime
+import uasyncio as asyncio
 import struct
+import time
 import machine
 import network
-from machine import RTC, WDT, Pin
-from bluetooth import BLE
+import ntptime
+import ujson
+import gc
+import usocket
+from machine import RTC, Pin
+import aioble
+from micropython import const
 
-# ---------------- ❶ USER CONFIG ----------------
-WIFI_SSID      = "jenova"
-WIFI_PASSWORD  = "hahako90"
+# ===================== USER CONFIG =====================
+WIFI_SSID = "jenova"
+WIFI_PASSWORD = "hahako90"
 WIFI_BACKOFF_S = [5, 10, 20]
 
-TZ_OFFSET   = 7 * 3600            # UTC+7
-NTP_HOST    = "time.apple.com"
-NTP_TRIES   = 5
+TZ_OFFSET = 25230  # UTC+7 Bangkok (seconds)
+NTP_HOST = "time.apple.com"
+NTP_TRIES = 5
 
 LY_CLOCKS = [
-    "A4:C1:38:12:34:56",
-    "A4:C1:38:65:43:21",
+    "18:5E:D1:40:DC:CB",
+    "E7:2E:00:50:60:74",
 ]
 
-LOG_API_IP     = "192.168.1.29"
-LOG_API_PORT   = 8085
-LOG_API_PATH   = "/log"
-LOG_API_KEY    = "hahako90pfx58tOdCikxdpFd9PW9S8RFPqejxFbX"
-LOG_CACHE_FILE = "log_cache.txt"
+LOG_API_IP = "192.168.1.29"
+LOG_API_PORT = 8085
+LOG_API_PATH = "/log"
+LOG_API_KEY = "uqWe83dkyfDIFNS6eTjE7dQHH0DBXbDv9qhTqpd4daYdjWb0e6Oh5Y7p19o2KmNgDERDocwt6tlyyEoIUs2Y3K5dmg5NHgIbJWVVPqZliInAVdCj2FbToIwGjlG34ckmuBTSa14MdqFpWDIrwj4ICi8XhMZSf7ru"
+LOG_FILE_NAME = "esp32_clock_sync.log"
 
-BASE_SLEEP_SEC = 4 * 3600         # 4 h
-WDT_TIMEOUT_MS = 15_000           # 15 s
+BASE_SLEEP_SEC = 4 * 3600  # 4 hours
+LED_PIN = 2
+SCAN_DURATION_MS = 15 * 60 * 1000  # 15 minutes
 
-LED_PIN       = 2
-DIAG_PORT     = 9090
-DIAG_TIMEOUT  = 30
+# GATT UUIDs
+TIME_SERVICE_UUID = const("EBE0CCB0-7A0A-4B0C-8A1A-6FF2997DA3A6")
+TIME_CHAR_UUID = const("EBE0CCB7-7A0A-4B0C-8A1A-6FF2997DA3A6")
 
-# ---------------- Globals ----------------
-boot_time = time.time()
-rtc       = RTC()
-wdt       = WDT(timeout=WDT_TIMEOUT_MS)
-led       = Pin(LED_PIN, Pin.OUT)
+# ===================== GLOBAL OBJECTS =====================
+rtc = RTC()
+led = Pin(LED_PIN, Pin.OUT)
 
-# ---------------- Utility Functions ----------------
-def cache_log(entry):
-    try:
-        with open(LOG_CACHE_FILE, "a") as f:
-            f.write(ujson.dumps(entry) + "\n")
-    except:
-        pass
+# ===================== LYWSD02 CLIENT =====================
+class Lywsd02TimeClient:
+    def __init__(self, mac, tz_offset_hours):
+        self.mac = mac
+        self.tz_offset_hours = tz_offset_hours
+    
+    async def set_time(self, timestamp_utc=None):
+        """Set device time using UTC timestamp and timezone offset"""
+        if timestamp_utc is None:
+            timestamp_utc = time.time()
+        
+        # Pack data: 4-byte timestamp + 1-byte timezone
+        data = struct.pack('<Ib', int(timestamp_utc), self.tz_offset_hours)
+        
+        try:
+            # Connect to device
+            device = aioble.Device(aioble.ADDR_RANDOM, self.mac)
+            connection = await device.connect(timeout_ms=10000)
+            
+            # Access time service and characteristic
+            service = await connection.service(TIME_SERVICE_UUID)
+            char = await service.characteristic(TIME_CHAR_UUID)
+            
+            # Write time data with response
+            await char.write(data, True)
+            return True
+        except (asyncio.TimeoutError, OSError) as e:
+            return False
+        finally:
+            if 'connection' in locals():
+                await connection.disconnect()
 
-# Blocking POST but non-blocking caller; feeds watchdog inside loop
-def post_log_sync(entry, retries=3):
-    payload = ujson.dumps(entry)
+# ===================== UTILITY FUNCTIONS =====================
+def post_log_sync(message: str, retries: int = 3) -> bool:
+    """Send log message to API"""
+    payload = ujson.dumps({"fileName": LOG_FILE_NAME, "message": message})
     for _ in range(retries):
-        wdt.feed()
         try:
             s = usocket.socket()
             s.settimeout(2)
@@ -80,29 +100,16 @@ def post_log_sync(entry, retries=3):
             time.sleep(1)
     return False
 
-# Flush all cached logs (blocking)
-def flush_log_cache():
-    if LOG_CACHE_FILE in uos.listdir():
-        try:
-            lines = open(LOG_CACHE_FILE).read().splitlines()
-            for ln in lines:
-                entry = ujson.loads(ln)
-                if not post_log_sync(entry):
-                    return False
-            uos.remove(LOG_CACHE_FILE)
-        except:
-            return False
-    return True
-
 def indicate(success: bool):
+    """Visual feedback using LED"""
     if success:
         led.on(); time.sleep_ms(200); led.off()
     else:
         for _ in range(3):
             led.on(); time.sleep_ms(100); led.off(); time.sleep_ms(100)
 
-# ---------------- Adaptive Sleep ----------------
-def load_state():
+def load_state() -> dict:
+    """Load state from RTC memory"""
     try:
         mem = rtc.memory()
         return ujson.loads(mem) if mem else {}
@@ -110,195 +117,237 @@ def load_state():
         return {}
 
 def save_state(st: dict):
+    """Save state to RTC memory"""
     rtc.memory(ujson.dumps(st))
 
-state = load_state()
-state.setdefault("ntp_fails", 0)
-if "diag_token" not in state:
-    import ubinascii, os
-    state["diag_token"] = ubinascii.hexlify(os.urandom(4)).decode()
-token = state["diag_token"]
-
-sf = state["ntp_fails"]
-if sf >= 6:
-    sleep_sec = BASE_SLEEP_SEC * 4
-elif sf >= 3:
-    sleep_sec = BASE_SLEEP_SEC * 2
-else:
-    sleep_sec = BASE_SLEEP_SEC
-
-# ---------------- Diagnostic Server ----------------
-def diag_server(token):
-    s = usocket.socket()
-    s.settimeout(DIAG_TIMEOUT)
-    try:
-        s.bind(("0.0.0.0", DIAG_PORT))
-        s.listen(1)
-        end = time.time() + DIAG_TIMEOUT
-        while time.time() < end:
-            try:
-                cl, _ = s.accept()
-                req = cl.readline().decode()
-                if f"/diag?token={token}" in req:
-                    info = {
-                        "mem_free": gc.mem_free(),
-                        "uptime_s": time.time() - boot_time,
-                        "sleep_s": sleep_sec,
-                        "ntp_fails": state["ntp_fails"],
-                        "cache_len": len(open(LOG_CACHE_FILE).read().splitlines())
-                                     if LOG_CACHE_FILE in uos.listdir() else 0
-                    }
-                    body = ujson.dumps(info)
-                    hdr = "\r\n".join([
-                        "HTTP/1.1 200 OK",
-                        "Content-Type: application/json",
-                        f"Content-Length: {len(body)}",
-                        "", body
-                    ])
-                    cl.send(hdr.encode())
-                else:
-                    cl.send(b"HTTP/1.1 403 Forbidden\r\n\r\n")
-                cl.close()
-            except:
-                pass
-    finally:
-        try: s.close()
-        except: pass
-
-# ---------------- Network & NTP ----------------
-def ensure_wifi():
+# ===================== NETWORK & TIME FUNCTIONS =====================
+def ensure_wifi() -> bool:
+    """Connect to WiFi with retry logic"""
+    post_log_sync(ujson.dumps({"stage": "ensure_wifi_start"}))
+    state = load_state()
     fails = state.get("wifi_fails", 0)
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
+    
     for backoff in WIFI_BACKOFF_S:
-        wdt.feed()
         if wlan.isconnected():
+            post_log_sync(ujson.dumps({"stage": "wifi_already_connected"}))
             state["wifi_fails"] = 0
             save_state(state)
             return True
+            
         wlan.connect(WIFI_SSID, WIFI_PASSWORD)
         t0 = time.time()
         while time.time() - t0 < backoff:
             if wlan.isconnected():
+                post_log_sync(ujson.dumps({
+                    "stage": "wifi_connected", 
+                    "attempt_backoff": backoff
+                }))
                 state["wifi_fails"] = 0
                 save_state(state)
                 return True
             time.sleep(1)
         fails += 1
+        
     state["wifi_fails"] = fails
     save_state(state)
+    post_log_sync(ujson.dumps({
+        "stage": "ensure_wifi_failed", 
+        "fails": fails
+    }))
     return False
 
-def sync_rtc():
+def sync_rtc() -> bool:
+    """Sync ESP32 RTC with NTP server"""
+    post_log_sync(ujson.dumps({"stage": "sync_rtc_start"}))
+    state = load_state()
+    
     for attempt in range(1, NTP_TRIES + 1):
-        wdt.feed()
         try:
             ntptime.host = NTP_HOST
             ntptime.settime()
             utc = time.time()
-            lm = time.gmtime(utc + TZ_OFFSET)
-            if lm[0] < 2025:
-                raise Exception("Bad year from NTP")
-            dow = lm[6] + 1 if lm[6] else 7
-            rtc.datetime((lm[0], lm[1], lm[2], dow,
-                          lm[3], lm[4], lm[5], 0))
+            
+            # Validate time (year should be >= 2023)
+            if time.gmtime(utc)[0] < 2023:
+                raise ValueError("Invalid time received from NTP")
+                
             state["ntp_fails"] = 0
             save_state(state)
+            post_log_sync(ujson.dumps({"stage": "sync_rtc_success"}))
             return True
         except Exception as e:
-            state["ntp_fails"] += 1
+            state["ntp_fails"] = state.get("ntp_fails", 0) + 1
             save_state(state)
-            cache_log({"stage": "ntp", "try": attempt, "error": str(e)})
+            post_log_sync(ujson.dumps({
+                "stage": "sync_rtc_error", 
+                "try": attempt, 
+                "error": str(e)
+            }))
             time.sleep(2)
     return False
 
-# ---------------- BLE Time Sync ----------------
-def _exact_time_packet():
-    tm = time.localtime()
-    dow = tm[6] + 1 if tm[6] else 7
-    # little-endian: year(uint16), month, day, hour, minute, second, weekday, flags
-    return struct.pack('<HBBBBBBH', tm[0], tm[1], tm[2], tm[3], tm[4], tm[5], dow, 0x0100)
-
-def sync_lywsd(mac, ble):
-    start = time.ticks_ms()
-    addr = bytes(int(b,16) for b in mac.split(":")[::-1])
+# ===================== BLE OPERATIONS =====================
+async def scan_for_devices():
+    """Scan for LYWSD02 devices, stopping early if all targets found"""
+    # Create uppercase set of target MACs for case-insensitive matching
+    target_macs = {mac.upper() for mac in LY_CLOCKS}
+    found_targets = set()
+    
+    post_log_sync(ujson.dumps({
+        "stage": "scan_start", 
+        "duration_ms": SCAN_DURATION_MS,
+        "targets": list(target_macs)
+    }))
+    
     try:
-        if not ble.gap_connect(0x00, addr):
-            return False
-        while time.ticks_diff(time.ticks_ms(), start) < 1000:
-            wdt.feed()
-            ev = ble.events()
-            if ev and ev[0] == 1:
-                conn = ev[2]
-                break
-            time.sleep_ms(20)
-        else:
-            return False
-        svcs  = ble.gattc_services(conn)
-        chars = ble.gattc_characteristics(conn, svcs[0][0])
-        for c in chars:
-            if c[2].lower() == "2a2b":
-                ble.gattc_write(conn, c[0], _exact_time_packet(), 1)
-                ble.gap_disconnect(conn)
-                return True
-        ble.gap_disconnect(conn)
-        return False
+        # Start scanning with optimized parameters
+        async with aioble.scan(
+            SCAN_DURATION_MS, 
+            interval_us=30000, 
+            window_us=30000, 
+            active=True
+        ) as scanner:
+            # Track time to detect when we've found all targets
+            start_time = time.ticks_ms()
+            
+            async for result in scanner:
+                # Check if we've found all targets
+                if found_targets.issuperset(target_macs):
+                    post_log_sync(ujson.dumps({
+                        "stage": "scan_complete_early", 
+                        "found_all": True,
+                        "elapsed_ms": time.ticks_diff(time.ticks_ms(), start_time)
+                    }))
+                    break
+                
+                try:
+                    # Extract MAC address from advertisement
+                    mac = str(result).split(',')[1].split(')')[0].strip().upper()
+                    
+                    # Extract device name safely
+                    name = result.name() if callable(result.name) else result.name
+                    
+                    # Check if device matches our targets
+                    if mac in target_macs or (name and ("LYWSD02" in name or "MHO-C303" in name)):
+                        found_targets.add(mac)
+                        post_log_sync(ujson.dumps({
+                            "stage": "scan_found", 
+                            "mac": mac,
+                            "remaining": len(target_macs - found_targets)
+                        }))
+                        
+                        # Stop scanning immediately if we have all targets
+                        if found_targets.issuperset(target_macs):
+                            post_log_sync(ujson.dumps({
+                                "stage": "scan_complete_early", 
+                                "found_all": True,
+                                "elapsed_ms": time.ticks_diff(time.ticks_ms(), start_time)
+                            }))
+                            break
+                except Exception as e:
+                    post_log_sync(ujson.dumps({
+                        "stage": "scan_error",
+                        "error": str(e)
+                    }))
     except Exception as e:
-        cache_log({"stage": "ble", "mac": mac, "error": str(e)})
-        try: ble.gap_disconnect(conn)
-        except: pass
-        return False
+        post_log_sync(ujson.dumps({
+            "stage": "scan_failed",
+            "error": str(e)
+        }))
+    
+    return found_targets
 
-# ---------------- Main ----------------
+async def sync_devices(devices, tz_offset_hours):
+    """Sync time with found devices"""
+    results = {}
+    for mac in devices:
+        gc.collect()
+        try:
+            client = Lywsd02TimeClient(mac, tz_offset_hours)
+            success = await client.set_time()
+            results[mac] = success
+            
+            post_log_sync(ujson.dumps({
+                "stage": "ble_write_result", 
+                "mac": mac, 
+                "ok": success
+            }))
+            
+            # Delay between device syncs
+            await asyncio.sleep(3)
+        except Exception as e:
+            results[mac] = False
+            post_log_sync(ujson.dumps({
+                "stage": "ble_sync_error",
+                "mac": mac,
+                "error": str(e)
+            }))
+    return results
+
+# ===================== MAIN WORKFLOW =====================
+async def main_workflow():
+    """Main async workflow"""
+    # Load state and determine sleep duration
+    state = load_state()
+    ntp_fails = state.get("ntp_fails", 0)
+    sleep_sec = BASE_SLEEP_SEC * (4 if ntp_fails >= 6 else 2 if ntp_fails >= 3 else 1)
+    
+    # 1. Ensure WiFi connection
+    post_log_sync(ujson.dumps({"stage": "main_start"}))
+    if not ensure_wifi():
+        post_log_sync(ujson.dumps({"stage": "main_wifi_failed"}))
+        indicate(False)
+        return sleep_sec
+
+    # 2. Sync RTC with NTP
+    ok_ntp = sync_rtc()
+    
+    # 3. Scan and sync devices
+    found_devices = await scan_for_devices()
+    if found_devices:
+        # Convert timezone offset to hours
+        tz_hours = TZ_OFFSET // 3600
+        await sync_devices(found_devices, tz_hours)
+    
+    # 4. Log results and prepare for sleep
+    summary = ujson.dumps({
+        "ntp_ok": ok_ntp,
+        "ntp_fails": state.get("ntp_fails", 0),
+        "mem_free": gc.mem_free(),
+        "sleep_s": sleep_sec
+    })
+    post_log_sync(ujson.dumps({
+        "stage": "main_summary", 
+        "summary": summary
+    }))
+    
+    indicate(True)
+    return sleep_sec
+
 def main():
+    """Entry point with error handling"""
+    gc.collect()
     try:
-        time.sleep_ms(200)
-        if not ensure_wifi():
-            cache_log({"stage": "wifi_fail"})
-            indicate(False)
-            machine.deepsleep(sleep_sec * 1000)
-
-        # start diagnostics listener
-        _thread.start_new_thread(diag_server, (token,))
-
-        # flush old logs
-        flush_log_cache()
-
-        ok_ntp = sync_rtc()
-        ble = BLE(); ble.active(True)
-        results = []
-        for mac in LY_CLOCKS:
-            wdt.feed()
-            ok = sync_lywsd(mac, ble)
-            results.append({"mac": mac, "ok": ok})
-
-        entry = {
-            "timestamp": time.time(),
-            "ntp_ok": ok_ntp,
-            "ntp_fails": state["ntp_fails"],
-            "mem_free": gc.mem_free(),
-            "sleep_s": sleep_sec,
-            "clocks": results,
-            "diag_token": token
-        }
-
-        # log asynchronously
-        _thread.start_new_thread(
-            lambda e: (flush_log_cache() or True) and (post_log_sync(e) or cache_log(e)),
-            (entry,)
-        )
-        indicate(True)
-        ble.active(False)
+        # Run main workflow
+        sleep_sec = asyncio.run(main_workflow())
+        
+        # Prepare for deep sleep
+        post_log_sync(ujson.dumps({
+            "stage": "main_sleeping", 
+            "sleep_sec": sleep_sec
+        }))
         machine.deepsleep(sleep_sec * 1000)
-
+        
     except Exception as ex:
-        import uio, sys
-        buf = uio.StringIO()
-        sys.print_exception(ex, buf)
-        cache_log({"stage": "fatal", "trace": buf.getvalue()})
+        # Critical error handling
+        post_log_sync(ujson.dumps({
+            "stage": "fatal", 
+            "error": str(ex)
+        }))
         time.sleep(5)
         machine.reset()
 
 if __name__ == "__main__":
     main()
-# --------------------------------------------------------------------
