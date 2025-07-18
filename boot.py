@@ -79,6 +79,7 @@ def connect_wifi(
         t0 = time.time()
         while time.time() - t0 < check_seconds:
             if wlan.isconnected():
+                time.sleep(5)
                 break
             time.sleep(1)  # pragma: no cover
 

@@ -64,8 +64,8 @@ class Lywsd02TimeClient:  # pragma: no cover - hardware dependent
             gc.collect()
             try:
                 device = aioble.Device(aioble.ADDR_PUBLIC, self.mac)
-                await asyncio.sleep_ms(200)
-                connection = await device.connect(timeout_ms=5000)
+                await asyncio.sleep_ms(5000)
+                connection = await device.connect(timeout_ms=10000)
                 break
             except Exception as e:
                 post_log_sync(ujson.dumps({
@@ -227,7 +227,7 @@ async def sync_devices(mac_set: set, tz_offset_hours: int):  # pragma: no cover
         post_log_sync(ujson.dumps({
             "stage": "ble_write_result", "mac": mac, "ok": ok
         }))
-        await asyncio.sleep(2)      # tiny delay between devices
+        await asyncio.sleep(5)      # tiny delay between devices
 
 # ─────────────────── MAIN WORKFLOW ───────────────────
 async def main_workflow():  # pragma: no cover
