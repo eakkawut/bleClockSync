@@ -38,7 +38,7 @@ LOG_FILE_NAME   = "esp32_clock_sync.log"
 
 BASE_SLEEP_SEC  = 10                # ← always deep-sleep this long
 LED_PIN         = 2
-SCAN_DURATION_MS = 10_000           # ← 10 s BLE scan
+SCAN_DURATION_MS = 120_000          # ← 2 min BLE scan
 
 # GATT UUIDs
 TIME_SERVICE_UUID = bluetooth.UUID("EBE0CCB0-7A0A-4B0C-8A1A-6FF2997DA3A6")
@@ -188,9 +188,9 @@ def sync_rtc() -> bool:  # pragma: no cover
     return False
 
 # ─────────────────── BLE OPS ───────────────────
-async def scan_for_devices() -> set:  # pragma: no cover - hardware dependent
-    """Return unique MACs of devices whose name contains LYWSD02 / MHO-C303."""
-    found = set()
+async def scan_for_devices() -> list:  # pragma: no cover - hardware dependent
+    """Return devices advertising required UUIDs."""
+    found = []
     try:
         async with aioble.scan(
             SCAN_DURATION_MS,
@@ -198,34 +198,47 @@ async def scan_for_devices() -> set:  # pragma: no cover - hardware dependent
         ) as scanner:
             async for res in scanner:
                 try:
-                    name = res.name() if callable(res.name) else res.name
-                    if name and ("LYWSD02" in name or "MHO-C303" in name):
-                        mac = str(res).split(",")[1].split(")")[0].strip().upper()
-                        if mac not in found:
-                            found.add(mac)
-                            post_log_sync(ujson.dumps({
-                                "stage": "scan_found", "mac": mac
-                            }))
+                    services = list(res.services())
+                    if TIME_SERVICE_UUID in services and TIME_CHAR_UUID in services:
+                        mac = res.device.addr_hex().upper()
+                        name = res.name() if callable(res.name) else res.name
+                        found.append((mac, name))
+                        msg = ujson.dumps({"stage": "scan_found", "mac": mac, "name": name})
+                        post_log_sync(msg)
+                        print(mac, name)
                 except Exception as e:
                     post_log_sync(ujson.dumps({"stage": "scan_err", "error": repr(e)}))
     except Exception as e:
         post_log_sync(ujson.dumps({"stage": "scan_fail", "error": repr(e)}))
+    if found:
+        post_log_sync(ujson.dumps({"stage": "scan_list", "devices": found}))
+        print(found)
     return found
 
-async def sync_devices(mac_set: set, tz_offset_hours: int):  # pragma: no cover
-    """Write time to every discovered device."""
-    for mac in mac_set:
+async def sync_devices(dev_list: list, tz_offset_hours: int):  # pragma: no cover
+    """Write time to every discovered device with retries."""
+    for mac, name in dev_list:
         gc.collect()
         ok = False
-        try:
-            client = Lywsd02TimeClient(mac, tz_offset_hours)
-            ok = await client.set_time()
-        except Exception as e:
-            post_log_sync(ujson.dumps({
-                "stage": "ble_sync_error", "mac": mac, "error": repr(e)
-            }))
+        for attempt in range(1, 11):
+            try:
+                client = Lywsd02TimeClient(mac, tz_offset_hours)
+                ok = await client.set_time()
+                if ok:
+                    break
+            except Exception as e:
+                post_log_sync(ujson.dumps({
+                    "stage": f"ble_sync_error_{attempt}",
+                    "mac": mac,
+                    "name": name,
+                    "error": repr(e)
+                }))
+            await asyncio.sleep(1)
         post_log_sync(ujson.dumps({
-            "stage": "ble_write_result", "mac": mac, "ok": ok
+            "stage": "ble_write_result",
+            "mac": mac,
+            "name": name,
+            "ok": ok
         }))
         await asyncio.sleep(5)      # tiny delay between devices
 

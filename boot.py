@@ -58,14 +58,16 @@ def connect_wifi(
     ssid: str = SSID,
     password: str = PASSWORD,
     attempts: int = 50,
-    check_seconds: int = 10,
+    check_seconds: int = 7,
     max_internet_tries: int = 5,
     deep_sleep_ms: int = 60_000,
 ) -> bool:
     """Connect to Wi-Fi and verify internet access.
 
-    If Wi-Fi or internet access cannot be established after all
-    attempts, the device deep sleeps for ``deep_sleep_ms`` milliseconds.
+    Each connection attempt waits ``check_seconds`` seconds for the
+    association to complete. If Wi-Fi or internet access cannot be
+    established after all attempts, the device deep sleeps for
+    ``deep_sleep_ms`` milliseconds.
     """
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
@@ -76,12 +78,12 @@ def connect_wifi(
                 wlan.connect(ssid, password)
             except Exception as e:  # pragma: no cover - best effort
                 print("wifi connect error", e)
+
         t0 = time.time()
         while time.time() - t0 < check_seconds:
             if wlan.isconnected():
-                time.sleep(5)
                 break
-            time.sleep(1)  # pragma: no cover
+            time.sleep(1)
 
         if wlan.isconnected():
             for _ in range(max_internet_tries):
@@ -92,6 +94,8 @@ def connect_wifi(
                 except Exception as e:  # pragma: no cover - best effort
                     print("internet check error", e)
                     time.sleep(1)
+        else:
+            time.sleep(1)
 
     print("Wi-Fi or internet not available, deep sleeping")  # pragma: no cover
     try:
