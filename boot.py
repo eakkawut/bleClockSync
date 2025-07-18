@@ -125,8 +125,8 @@ def sync_rtc(tries: int = 5, tz_offset: int = 25205) -> bool:
 def main() -> None:
     """Entry point executed on boot."""
     try:
-        ensure_dependencies()
         connect_wifi()
+        ensure_dependencies()
         sync_rtc()
     except Exception as err:  # pragma: no cover - safety net
         print("boot error", err)
