@@ -7,7 +7,7 @@
 | **3 · Install `mpremote` + `esptool`** | `python -m pip install --upgrade mpremote esptool` | `mpremote` = file-manager & REPL · `esptool` = flasher |
 | **4 · Find the board’s COM port** | Device Manager → **Ports (COM & LPT)** → e.g. **COM3** | If you use **WebREPL** (Wi-Fi) you can omit `connect COM3` in every command. |
 | **5 · Open a USB REPL** | `python -m mpremote connect COM3` | Exit with **Ctrl-\]** or **Ctrl-X**. |
-| **6 · Send (copy) a file to `/flash/`** | `python -m mpremote connect COM3 cp main.py :` | `:` = root of ESP flash. Use `-r src/ :` to copy a folder. |
+| **6 · Send (copy) a file to `/flash/`** | `python -m mpremote connect COM3 cp main.py :` | `:` = root of ESP flash. Use `-r lib/ :lib` for bundled modules. |
 | **7 · Fetch a file PC ← ESP** | `python -m mpremote connect COM3 cp :boot.py .` | Copies into the current PC directory. |
 | **8 · Delete a file on the ESP** | `python -m mpremote connect COM3 rm :lib/old.py` | List with `mpremote … ls :` |
 | **9 · Soft-reset (run `boot.py` ➜ `main.py`)** | `python -m mpremote connect COM3 reset` | Equivalent to pressing **EN / RST**. |
