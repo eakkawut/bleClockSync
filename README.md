@@ -18,3 +18,10 @@ python -m esptool --port COM3 write_flash -z 0x1000 micropython.bin
 
 > **Tip – WebREPL instead of USB**  
 > Replace every `connect COM3` with `connect ws:192.168.x.x` (or just omit `connect …` if `mpremote` has the board cached).
+
+
+## Boot behaviour
+
+The `boot.py` script now retries Wi-Fi connectivity until internet access is confirmed via NTP. If both Wi-Fi and internet fail after all retries the board deep sleeps for one minute before trying again.
+
+GitHub Actions run unit tests with coverage and report basic code quality via flake8.
