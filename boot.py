@@ -57,9 +57,9 @@ def ensure_dependencies():
 def connect_wifi(
     ssid: str = SSID,
     password: str = PASSWORD,
-    attempts: int = 10,
-    check_seconds: int = 3,
-    max_internet_tries: int = 3,
+    attempts: int = 50,
+    check_seconds: int = 10,
+    max_internet_tries: int = 5,
     deep_sleep_ms: int = 60_000,
 ) -> bool:
     """Connect to Wi-Fi and verify internet access.
