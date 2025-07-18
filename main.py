@@ -253,10 +253,12 @@ async def main_workflow():  # pragma: no cover
         "ntp_ok": ntp_ok
     }))
     indicate(True)
+    led.on()  # keep LED on while device is awake
 
 # ─────────────────── ENTRY POINT ───────────────────
 def main():
     gc.collect()
+    led.on()  # turn on LED on wake
     try:
         asyncio.run(main_workflow())
     except Exception as e:  # pragma: no cover
@@ -266,6 +268,7 @@ def main():
         post_log_sync(ujson.dumps({
             "stage": "sleep", "seconds": BASE_SLEEP_SEC
         }))
+        led.off()  # ensure LED off during deep sleep
         try:
             machine.deepsleep(BASE_SLEEP_SEC * 1000)   # ms → s
         except Exception:  # pragma: no cover - not critical in tests
