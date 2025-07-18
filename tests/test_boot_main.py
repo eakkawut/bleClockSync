@@ -36,18 +36,29 @@ class StubSetup(unittest.TestCase):
         class RTC:
             def datetime(self, dt=None):
                 self.dt = dt
+
         class Pin:
             OUT = 0
+
             def __init__(self, *a, **k):
                 pass
+
             def on(self):
                 pass
+
             def off(self):
                 pass
-        def deepsleep(ms):
-            pass
-        machine = types.SimpleNamespace(RTC=RTC, Pin=Pin, deepsleep=deepsleep)
-        sys.modules['machine'] = machine
+
+        class Machine:
+            def __init__(self):
+                self.RTC = RTC
+                self.Pin = Pin
+                self.last_deepsleep = None
+
+            def deepsleep(self, ms):
+                self.last_deepsleep = ms
+
+        sys.modules['machine'] = Machine()
 
         # aioble
         class DummyChar:
@@ -116,4 +127,52 @@ class StubSetup(unittest.TestCase):
         main.indicate = lambda *a, **k: None
         main.post_log_sync = lambda *a, **k: True
         main.main()
+
+    def test_connect_wifi_success(self):
+        boot = importlib.reload(importlib.import_module('boot'))
+
+        ntptime = sys.modules['ntptime']
+        calls = []
+
+        def ok():
+            calls.append(True)
+
+        ntptime.settime = ok
+
+        network = sys.modules['network']
+
+        class WLAN(network.WLAN):
+            def connect(self, ssid, password):
+                self.connected = True
+
+        network.WLAN = WLAN
+
+        machine = sys.modules['machine']
+        result = boot.connect_wifi(attempts=1, check_seconds=0)
+        self.assertTrue(result)
+        self.assertIsNone(machine.last_deepsleep)
+        self.assertEqual(len(calls), 1)
+
+    def test_connect_wifi_fail_sleep(self):
+        boot = importlib.reload(importlib.import_module('boot'))
+
+        ntptime = sys.modules['ntptime']
+
+        def fail():
+            raise OSError('no')
+
+        ntptime.settime = fail
+
+        network = sys.modules['network']
+
+        class WLAN(network.WLAN):
+            def connect(self, ssid, password):
+                self.connected = False
+
+        network.WLAN = WLAN
+
+        machine = sys.modules['machine']
+        result = boot.connect_wifi(attempts=1, check_seconds=0, max_internet_tries=1, deep_sleep_ms=1234)
+        self.assertFalse(result)
+        self.assertEqual(machine.last_deepsleep, 1234)
 

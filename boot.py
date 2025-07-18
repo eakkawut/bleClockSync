@@ -54,30 +54,50 @@ def ensure_dependencies():
             print("could not install micropython", e)
 
 
-def connect_wifi(ssid: str = SSID, password: str = PASSWORD,
-                 attempts: int = 10, check_seconds: int = 3) -> bool:
-    """Connect to Wi-Fi with retries."""
+def connect_wifi(
+    ssid: str = SSID,
+    password: str = PASSWORD,
+    attempts: int = 10,
+    check_seconds: int = 3,
+    max_internet_tries: int = 3,
+    deep_sleep_ms: int = 60_000,
+) -> bool:
+    """Connect to Wi-Fi and verify internet access.
+
+    If Wi-Fi or internet access cannot be established after all
+    attempts, the device deep sleeps for ``deep_sleep_ms`` milliseconds.
+    """
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
+
     for _ in range(attempts):
-        if wlan.isconnected():
-            break  # pragma: no cover - break covered on success
-        try:
-            wlan.connect(ssid, password)
-        except Exception as e:  # pragma: no cover - best effort
-            print("wifi connect error", e)
+        if not wlan.isconnected():
+            try:
+                wlan.connect(ssid, password)
+            except Exception as e:  # pragma: no cover - best effort
+                print("wifi connect error", e)
         t0 = time.time()
         while time.time() - t0 < check_seconds:
             if wlan.isconnected():
                 break
             time.sleep(1)  # pragma: no cover
+
         if wlan.isconnected():
-            break
-    if wlan.isconnected():
-        print("Wi-Fi:", wlan.ifconfig())
-    else:  # pragma: no cover - debugging only
-        print("Wi-Fi not connected")
-    return wlan.isconnected()
+            for _ in range(max_internet_tries):
+                try:
+                    ntptime.settime()  # check internet connectivity
+                    print("Wi-Fi:", wlan.ifconfig())
+                    return True
+                except Exception as e:  # pragma: no cover - best effort
+                    print("internet check error", e)
+                    time.sleep(1)
+
+    print("Wi-Fi or internet not available, deep sleeping")  # pragma: no cover
+    try:
+        machine.deepsleep(deep_sleep_ms)
+    except Exception:  # pragma: no cover - not critical in tests
+        pass
+    return False
 
 
 def sync_rtc(tries: int = 5, tz_offset: int = 25205) -> bool:
