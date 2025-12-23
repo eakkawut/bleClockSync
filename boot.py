@@ -1,5 +1,4 @@
-# boot.py  – Wi-Fi + NTP + WebREPL (Telnet/FTP removed)
-import network, time, ntptime, machine, webrepl
+import network, time, ntptime, machine
 
 SSID, PASSWORD = "jenova", "hahako90"
 
@@ -37,5 +36,3 @@ def sync_rtc(tries=5, tz_offset=25205):
     return False
 
 sync_rtc()
-# ---------- WebREPL only ----------
-#webrepl.start()            # ws://<ip>:8266
