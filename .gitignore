@@ -1,1 +1,6 @@
 .DS_Store
+.pio/
+.vscode/
+sdkconfig.esp32-c3
+sdkconfig.esp32-c3.old
+include/config.h
